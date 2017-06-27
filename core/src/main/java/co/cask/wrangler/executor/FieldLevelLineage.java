@@ -20,6 +20,7 @@ import co.cask.wrangler.api.Step;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -33,53 +34,111 @@ import java.util.Set;
 
 public class FieldLevelLineage {
   private enum Type {
-    READ("read"),
-    MODIFY("modify"),
-    ADD("add"),
-    DROP("drop"),
-    RENAME("rename"),
-    SWAP("swap");
+    READ, MODIFY, ADD, DROP, RENAME, SWAP
+  }
 
-    private final String type;
+  private enum Action {
+    READ, DOWN, STOP, GOTO
+  }
 
-    Type(final String type) {
-      this.type = type;
+  private class ColumnTree {
+    BranchingStepNode head;
+    BranchingStepNode tail;
+    int length;
+
+    ColumnTree() {
+      this.length = 0;
+      this.head = new BranchingStepNode(null, Action.STOP);
+      this.tail = new BranchingStepNode(null, Action.STOP);
+      head.prev = tail.next = null;
+      head.next = tail;
+      tail.prev = head;
+    }
+
+    int size() {
+      return length;
+    }
+
+    void add(BranchingStepNode newNode) {
+      tail.clone(newNode);
+      tail.next = new BranchingStepNode(null, Action.STOP);
+      tail.next.prev = tail;
+      tail.next.next = null;
+      tail = tail.next;
+      ++length;
+    }
+
+    void addAll(ColumnTree copy) {
+      BranchingStepNode curr = copy.head.next;
+      while (!curr.isSentinel()) {
+        add(curr);
+        curr = curr.next;
+      }
     }
 
     @Override
     public String toString() {
-      return type;
+      StringBuilder returnVal = new StringBuilder("[");
+      String prefix = ", ";
+      BranchingStepNode curr = head;
+      returnVal.append(curr);
+      curr = curr.next;
+      while (curr != null) {
+        returnVal.append(prefix);
+        returnVal.append(curr);
+        curr = curr.next;
+      }
+      returnVal.append("]");
+      return returnVal.toString();
     }
   }
 
   private class BranchingStepNode {
-    boolean continueDown;
+    Action action;
     Step directive;
-    Map<String, Integer> branches;
+    Map<String, BranchingStepNode> branches;
+    BranchingStepNode prev, next;
 
-    BranchingStepNode(Step directive, boolean continueDown) {
+    BranchingStepNode(Step directive, Action action) {
       this.directive = directive;
+      this.action = action;
       this.branches = new HashMap<>();
-      this.continueDown = continueDown;
     }
 
-    void put(String columnName, int skips) {
-      branches.put(columnName, skips);
+    void putAction(String columnName) {
+      branches.put(columnName, lineage.get(columnName).tail.prev);
+    }
+
+    void putRead(String columnName) {
+      branches.put(columnName, lineage.get(columnName).tail);
+    }
+
+    void clone(BranchingStepNode source) {
+      this.action = source.action;
+      this.directive = source.directive;
+      this.branches = source.branches;
+    }
+
+    boolean isSentinel() {
+      return directive == null;
     }
 
     @Override
     public String toString() {
-      return "(Step: " + directive.getClass().getSimpleName() + ", Branches: " + branches + ")";
+      if (isSentinel()) {
+        return "(Sentinel Node)";
+      }
+      return "(Step: " + directive.getClass().getSimpleName() + ", Action: " +
+          action.toString().toLowerCase() + ", Branches: " + branches + ")";
     }
   }
 
   private class PrintNode {
     private boolean newBranch;
-    private String dataSetName, columnName, stepName;
+    private String columnName, stepName;
     List<PrintNode> children;
 
-    PrintNode(String dataSetName, String columnName, String stepName) {
-      this.dataSetName = dataSetName;
+    PrintNode(String columnName, String stepName) {
       this.columnName = columnName;
       this.stepName = stepName;
       this.newBranch = stepName == null;
@@ -92,48 +151,41 @@ public class FieldLevelLineage {
 
     private void prettyPrint(String indent, boolean last) {
       System.out.print(indent);
-      if(last) {
+      if (last) {
         System.out.print("\\-");
         indent += "  ";
-      }
-      else {
+      } else {
         System.out.print("|-");
         indent += "| ";
       }
       System.out.println(this);
-
       for (int i = 0; i < children.size(); ++i) {
         children.get(i).prettyPrint(indent, i == children.size() - 1);
       }
     }
 
     public String toString() {
-      if(!newBranch) {
+      if (!newBranch) {
         return "Step: " + stepName;
-      }
-      else {
-        return "DataSet: " + dataSetName + ", Column: " + columnName;
+      } else {
+        return "Column: " + columnName;
       }
     }
   }
 
   private final long startTime;
   private final String programName;
-  private final String dataSetName; // dataSet/stream name/id
-  private final String[] finalColumns;
   private final Set<String> currentColumns;
-  private final Map<String, List<BranchingStepNode>> lineage;
+  private final Map<String, ColumnTree> lineage;
 
-  public FieldLevelLineage(String dataSetName, String[] columnNames) {
+  public FieldLevelLineage(String[] finalColumns) {
     this.startTime = System.currentTimeMillis();
     this.programName = "wrangler";
-    this.dataSetName = dataSetName;
-    this.finalColumns = columnNames.clone();
-    this.lineage = new HashMap<>(columnNames.length);
-    this.currentColumns = new HashSet<>(columnNames.length);
-    for(String key : columnNames) {
-      lineage.put(key, new ArrayList<BranchingStepNode>());
-      currentColumns.add(key);
+    this.currentColumns = new HashSet<>();
+    Collections.addAll(currentColumns, finalColumns);
+    this.lineage = new HashMap<>(finalColumns.length);
+    for (String key : currentColumns) {
+      lineage.put(key, new ColumnTree());
     }
   }
 
@@ -145,184 +197,239 @@ public class FieldLevelLineage {
     return this.programName;
   }
 
-  public String getDataSetName() {
-    return this.dataSetName;
-  }
-
-  public String[] getFinalColumns() {
-    return this.finalColumns;
+  public Map<String, ColumnTree> getLineage() {
+    return this.lineage;
   }
 
   private void create(String key) {
-    if(!lineage.containsKey(key)) {
-      lineage.put(key, new ArrayList<BranchingStepNode>());
+    if (!lineage.containsKey(key)) {
+      lineage.put(key, new ColumnTree());
     }
     currentColumns.add(key);
   }
 
-  private void parseAndAdd(String phrase, List<String> list) {
+  private List<String> parseAndAdd(String phrase) {
     String[] commands = phrase.split(" ");
-    if(commands.length == 2) {
+    List<String> list = new ArrayList<>();
+    if (commands.length == 2) {
       list.addAll(currentColumns);
-    }
-    else if(commands[2].equals("formatted")) {
+    } else if (commands[2].equals("formatted")) {
       String regex = commands[3];
       regex = regex.replaceAll("([\\\\.\\[{(*+?^$|])", "\\\\$1");
       regex = regex.replaceAll("%s", ".+");
       regex = regex.replaceAll("%d", "[0-9]+");
-      for(String key : currentColumns) {
-        if(key.matches(regex)) {
+      for (String key : currentColumns) {
+        if (key.matches(regex)) {
           list.add(key);
         }
       }
-    }
-    else {
+    } else {
       list.addAll(currentColumns);
-      for(int i = 3; i < commands.length; ++i) {
+      for (int i = 3; i < commands.length; ++i) {
         list.remove(commands[i]);
       }
     }
+    return list;
+  }
+
+  private void insertRead(String key, Step directive, BranchingStepNode node, BranchingStepNode stopNode) {
+    lineage.get(key).add(new BranchingStepNode(directive, Action.READ));
+    node.putRead(key);
+    stopNode.putRead(key);
+  }
+
+  private void insertModify(String key, BranchingStepNode node) {
+    for (String readCol : node.branches.keySet()) {
+      lineage.get(readCol).tail.prev.putAction(key);
+    }
+    lineage.get(key).add(node);
+  }
+
+  private void insertDrop(String key, BranchingStepNode node) {
+    create(key);
+    for (String readCol : node.branches.keySet()) {
+      lineage.get(readCol).tail.prev.putAction(key);
+    }
+    lineage.get(key).add(node);
+  }
+
+  private void insertAdd(String key, BranchingStepNode node) {
+    currentColumns.remove(key);
+    for (String readCol : node.branches.keySet()) {
+      lineage.get(readCol).tail.prev.putAction(key);
+    }
+    lineage.get(key).add(node);
+  }
+
+  private void insertRename(String key, Step directive) {
+    String[] colSplit = key.split(" ");
+    String oldName = colSplit[0];
+    String newName = colSplit[1];
+    create(oldName);
+    currentColumns.remove(newName);
+    ColumnTree oldCol = lineage.get(oldName);
+    ColumnTree newCol = lineage.get(newName);
+    BranchingStepNode oldNode = new BranchingStepNode(directive, Action.GOTO);
+    BranchingStepNode newNode = new BranchingStepNode(directive, Action.STOP);
+    oldNode.putAction(newName);
+    oldCol.add(new BranchingStepNode(directive, Action.STOP));
+    oldCol.add(oldNode);
+    newCol.add(newNode);
+    newNode.putRead(oldName);
+  }
+
+  private void insertSwap(String key, Step directive) {
+    String[] colSplit = key.split(" ");
+    String a = colSplit[0];
+    String b = colSplit[1];
+    ColumnTree colA = lineage.get(a);
+    ColumnTree colB = lineage.get(b);
+    BranchingStepNode swapNodeA = new BranchingStepNode(directive, Action.STOP);
+    BranchingStepNode swapNodeB = new BranchingStepNode(directive, Action.STOP);
+    BranchingStepNode readNodeA = new BranchingStepNode(directive, Action.GOTO);
+    BranchingStepNode readNodeB = new BranchingStepNode(directive, Action.GOTO);
+    readNodeA.putAction(b);
+    readNodeB.putAction(a);
+    colA.add(swapNodeA);
+    colA.add(readNodeA);
+    colB.add(swapNodeB);
+    colB.add(readNodeB);
+    swapNodeA.putRead(b);
+    swapNodeB.putRead(a);
   }
 
   public void store(Step[] steps) {
-    BranchingStepNode node, treeNode;
-    String[] colSplit;
-    List<String> columns, readCols, addCols, modifyCols, dropCols, renameCols, swapCols;
+    boolean readingCols;
+    BranchingStepNode node, stopNode;
+    List<String> columns;
 
-    for(Step currStep : steps) {
+    for (Step currStep : steps) {
       columns = currStep.getColumns();
-      readCols = new ArrayList<>();
-      addCols = new ArrayList<>();
-      modifyCols = new ArrayList<>();
-      dropCols = new ArrayList<>();
-      renameCols = new ArrayList<>();
-      swapCols = new ArrayList<>();
+      readingCols = true;
+      node = new BranchingStepNode(currStep, Action.DOWN);
+      stopNode = new BranchingStepNode(currStep, Action.STOP);
 
-      for(String column : columns) {
-        switch(Type.valueOf(column.getType().toUpperCase())) {
+      for (String column : columns) {
+        switch(Type.valueOf(currStep.getLabel(column).toUpperCase())) {
           case READ:
-            if(column.contains("all columns")) {
-              parseAndAdd(column, readCols);
+            if (!readingCols) {
+              node = new BranchingStepNode(currStep, Action.DOWN);
+              stopNode = new BranchingStepNode(currStep, Action.STOP);
             }
-            else {
-              readCols.add(column);
+            if (column.contains("all columns")) {
+              for (String key : parseAndAdd(column)) {
+                insertRead(key, currStep, node, stopNode);
+              }
+            } else {
+              insertRead(column, currStep, node, stopNode);
             }
             break;
 
           case MODIFY:
-            if(column.contains("all columns")) {
-              parseAndAdd(column, modifyCols);
+            if (column.contains("all columns")) {
+              for (String key : parseAndAdd(column)) {
+                insertModify(key, node);
+              }
+            } else {
+              insertModify(column, node);
             }
-            else {
-              modifyCols.add(column);
-            }
+            readingCols = false;
             break;
 
           case ADD:
-            if(column.contains("all columns")) {
-              parseAndAdd(column, addCols);
+            if (column.contains("all columns")) {
+              for (String key : parseAndAdd(column)) {
+                insertAdd(key, stopNode);
+              }
+            } else {
+              insertAdd(column, stopNode);
             }
-            else {
-              addCols.add(column);
-            }
+            readingCols = false;
             break;
 
           case DROP:
-            dropCols.add(column);
+            insertDrop(column, node);
+            readingCols = false;
             break;
 
           case RENAME:
-            renameCols.add(column);
+            insertRename(column, currStep);
+            readingCols = false;
             break;
 
           case SWAP:
-            swapCols.add(column);
+            insertSwap(column, currStep);
+            readingCols = false;
             break;
+
+          default:
+            System.err.println("Unrecognized label on column: " + column);
+            return;
         }
-      }
-
-      node = new BranchingStepNode(currStep, true);
-      for(String key : renameCols) {
-        colSplit = key.split(" ");
-        String oldName = colSplit[0];
-        String newName = colSplit[1];
-        create(oldName);
-        currentColumns.remove(newName);
-        lineage.get(oldName).add(node);
-        treeNode = new BranchingStepNode(currStep, false);
-        treeNode.put(oldName, lineage.get(oldName).size());
-        lineage.get(newName).add(treeNode);
-      }
-
-      for(String key : swapCols) {
-        colSplit = key.split(" ");
-        String a = colSplit[0];
-        String b = colSplit[1];
-        treeNode = new BranchingStepNode(currStep, false);
-        treeNode.put(b, lineage.get(b).size() + 1);
-        lineage.get(a).add(treeNode);
-        treeNode = new BranchingStepNode(currStep, false);
-        treeNode.put(a, lineage.get(a).size());
-        lineage.get(b).add(treeNode);
-      }
-
-      node = new BranchingStepNode(currStep, true);
-      treeNode = new BranchingStepNode(currStep, false);
-      for(String key : readCols) {
-        node.put(key, lineage.get(key).size());
-        treeNode.put(key, lineage.get(key).size());
-      }
-
-      for(String key : modifyCols) {
-        lineage.get(key).add(node);
-      }
-
-      for(String key : dropCols) {
-        create(key);
-        lineage.get(key).add(node);
-      }
-
-      for(String key : addCols) {
-        currentColumns.remove(key);
-        lineage.get(key).add(treeNode);
       }
     }
   }
 
-  private PrintNode generateTree(String colName, int skips, boolean start) {
-    List<BranchingStepNode> children = lineage.get(colName);
-    if(skips >= children.size()) {
+  private PrintNode generateLineage(String colName, BranchingStepNode currNode, boolean start) {
+    while (currNode.action == Action.READ || currNode.action == Action.GOTO) {
+      currNode = currNode.next;
+    }
+    if (!start && currNode.isSentinel()) {
       return null;
     }
-    BranchingStepNode currNode = children.get(skips);
-    PrintNode root = new PrintNode(dataSetName, colName, start ? null : currNode.directive.getClass().getSimpleName());
-    if(start) {
-      root.children.add(generateTree(colName, skips, false));
-    }
-    else {
-      if(currNode.continueDown) {
-        root.children.add(generateTree(colName, skips + 1, false));
+    PrintNode root = new PrintNode(colName, start ? null : currNode.directive.getClass().getSimpleName());
+    if (start) {
+      root.children.add(generateLineage(colName, currNode, false));
+    } else {
+      if (currNode.action == Action.STOP || currNode.action == Action.DOWN) {
+        for (Map.Entry<String, BranchingStepNode> entry : currNode.branches.entrySet()) {
+          root.children.add(generateLineage(entry.getKey(), entry.getValue(), true));
+        }
       }
-      for (Map.Entry<String, Integer> entry : currNode.branches.entrySet()) {
-        root.children.add(generateTree(entry.getKey(), entry.getValue(), true));
+      if (currNode.action != Action.STOP) {
+        root.children.add(generateLineage(colName, currNode.next, false));
       }
     }
     root.children.removeAll(Collections.singleton((PrintNode) null));
     return root;
   }
 
-  private PrintNode generateTree(String colName) {
-    return generateTree(colName, 0, true);
+  private PrintNode generateFuture(String colName, BranchingStepNode currNode, boolean start) {
+    if (!start && currNode.isSentinel()) {
+      return null;
+    }
+    PrintNode root = new PrintNode(colName, start ? null : currNode.directive.getClass().getSimpleName());
+    if (start) {
+      root.children.add(generateFuture(colName, currNode, false));
+    } else {
+      if (currNode.action == Action.GOTO || currNode.action == Action.READ) {
+        for (Map.Entry<String, BranchingStepNode> entry : currNode.branches.entrySet()) {
+          root.children.add(generateFuture(entry.getKey(), entry.getValue(), true));
+        }
+      }
+      if (currNode.action != Action.GOTO) {
+        root.children.add(generateFuture(colName, currNode.prev, false));
+      }
+    }
+    root.children.removeAll(Collections.singleton((PrintNode) null));
+    return root;
   }
 
-  public void printColumnDirectives(String column) {
-    PrintNode colPrintNode = generateTree(column);
-    colPrintNode.prettyPrint();
+  public void printColumnDirectives(String column, boolean future) {
+    PrintNode tree = future ? generateFuture(column, lineage.get(column).tail.prev, true)
+        : generateLineage(column, lineage.get(column).head.next, true);
+    tree.prettyPrint();
+  }
+
+  public void append(Map<String, ColumnTree> source) {
+    for (Map.Entry<String, ColumnTree> entry : source.entrySet()) {
+      lineage.get(entry.getKey()).addAll(entry.getValue());
+    }
   }
 
   @Override
   public String toString() {
-    return "Workspace Name: " + dataSetName + ", Program Name: " + programName + ", Start Time: " + startTime +
-        "\n" + "Column Directives: " + lineage;
+    return "Program Name: " + programName + ", Start Time: " + new Date(startTime) + "\n" +
+        "Column Directives: " + lineage;
   }
 }
