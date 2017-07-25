@@ -179,6 +179,7 @@
       <groupId>co.cask.cdap</groupId>
       <artifactId>cdap-etl-api</artifactId>
       <version>${cdap.version}</version>
+      <scope>system</scope>
     </dependency>
     <dependency>
       <groupId>co.cask.cdap</groupId>

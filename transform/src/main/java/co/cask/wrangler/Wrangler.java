@@ -24,8 +24,10 @@ import co.cask.cdap.api.data.format.StructuredRecord;
 import co.cask.cdap.api.data.schema.Schema;
 import co.cask.cdap.api.plugin.PluginConfig;
 import co.cask.cdap.etl.api.Emitter;
+import co.cask.cdap.etl.api.FieldLevelLineage;
 import co.cask.cdap.etl.api.InvalidEntry;
 import co.cask.cdap.etl.api.PipelineConfigurer;
+import co.cask.cdap.etl.api.StageSubmitter;
 import co.cask.cdap.etl.api.Transform;
 import co.cask.cdap.etl.api.TransformContext;
 import co.cask.wrangler.api.DirectiveParseException;
@@ -35,10 +37,12 @@ import co.cask.wrangler.api.Pipeline;
 import co.cask.wrangler.api.PipelineContext;
 import co.cask.wrangler.api.Record;
 import co.cask.wrangler.api.TransientStore;
+import co.cask.wrangler.api.lineage.WranglerFieldLevelLineage;
 import co.cask.wrangler.executor.PipelineExecutor;
 import co.cask.wrangler.parser.ConfigDirectiveContext;
 import co.cask.wrangler.parser.TextDirectives;
 import co.cask.wrangler.steps.DefaultTransientStore;
+import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,6 +51,7 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -234,6 +239,23 @@ public class Wrangler extends Transform<StructuredRecord, StructuredRecord> {
 
     // Initialize the error counter.
     errorCounter = 0;
+  }
+
+  /**
+   * Prepares Wrangler before execution of transform. Mainly preparing and sending field-level metadata
+   *
+   * @param context framework for transform stages
+   */
+  @Override
+  public void prepareRun(StageSubmitter<TransformContext> context) throws Exception {
+    List<String> endColumns = new ArrayList<>(oSchema.getFields().size());
+    for (Schema.Field field : oSchema.getFields()) {
+      endColumns.add(field.getName());
+    }
+    FieldLevelLineage f = new WranglerFieldLevelLineage(StringUtils.countMatches(config.directives, "\n"),
+                                                        endColumns);
+    // ((WranglerFieldLevelLineage) f).store(this.parseTree);
+    context.recordLineage(f);
   }
 
   /**
