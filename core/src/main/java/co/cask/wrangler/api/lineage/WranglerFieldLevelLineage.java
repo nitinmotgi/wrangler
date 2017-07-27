@@ -98,6 +98,7 @@ public class WranglerFieldLevelLineage implements FieldLevelLineage {
   }
 
   private int currentStepNumber;
+  private Map<String, Integer> readColumns;
   private final Set<String> currentColumns;
   private final TransformStep[] steps;
   private final Map<String, List<BranchingTransformStepNode>> lineage;
@@ -127,7 +128,7 @@ public class WranglerFieldLevelLineage implements FieldLevelLineage {
       list.addAll(currentColumns);
     } else if (commands[2].equals("formatted")) {
       String regex = commands[3];
-      regex = regex.replaceAll("([\\\\.\\[{(*+?^$|])", "\\\\$1");
+      regex = regex.replaceAll("([\\\\.\\[{}()*+?^$|])", "\\\\$1");
       regex = regex.replaceAll("%s", ".+");
       regex = regex.replaceAll("%d", "[0-9]+");
       for (String key : currentColumns) {
@@ -144,39 +145,39 @@ public class WranglerFieldLevelLineage implements FieldLevelLineage {
     return list;
   }
 
-  private void insertRead(String key, Map<String, Integer> readCols) {
+  private void insertRead(String key) {
     lineage.get(key).add(new WranglerBranchingStepNode(currentStepNumber, true, true));
-    readCols.put(key, lineage.get(key).size());
+    readColumns.put(key, lineage.get(key).size());
   }
 
-  private void insertBranches(String key, Set<String> readCols) {
+  private void insertBranches(String key) {
     List<BranchingTransformStepNode> curr;
-    for (String readCol : readCols) {
+    for (String readCol : readColumns.keySet()) {
       curr = lineage.get(readCol);
       ((WranglerBranchingStepNode) curr.get(curr.size() - 1)).putRead(key);
     }
   }
 
-  private void insertModify(String key, Map<String, Integer> readCols) {
+  private void insertModify(String key) {
     WranglerBranchingStepNode node = new WranglerBranchingStepNode(currentStepNumber, true, true);
-    insertBranches(key, readCols.keySet());
-    node.downBranches = readCols;
+    insertBranches(key);
+    node.downBranches = readColumns;
     lineage.get(key).add(node);
   }
 
-  private void insertDrop(String key, Map<String, Integer> readCols) {
+  private void insertDrop(String key) {
     create(key);
     WranglerBranchingStepNode node = new WranglerBranchingStepNode(currentStepNumber, false, true);
-    insertBranches(key, readCols.keySet());
-    node.downBranches = readCols;
+    insertBranches(key);
+    node.downBranches = readColumns;
     lineage.get(key).add(node);
   }
 
-  private void insertAdd(String key, Map<String, Integer> readCols) {
+  private void insertAdd(String key) {
     currentColumns.remove(key);
     WranglerBranchingStepNode node = new WranglerBranchingStepNode(currentStepNumber, true, false);
-    insertBranches(key, readCols.keySet());
-    node.downBranches = readCols;
+    insertBranches(key);
+    node.downBranches = readColumns;
     lineage.get(key).add(node);
   }
 
@@ -212,62 +213,59 @@ public class WranglerFieldLevelLineage implements FieldLevelLineage {
   }
 
   public void store(Step[] parseTree) {
-    Type curr, state;
-    String stepName;
-    List<String> columns, renames;
-    Map<String, Integer> reads;
+    List<String> columns, renames = new ArrayList<>();
 
     for (Step currStep : parseTree) {
-      state = Type.READ;
-      stepName = currStep.getClass().getSimpleName();
+      Type state = Type.READ;
+      String stepName = currStep.getClass().getSimpleName();
       columns = currStep.getColumns();
-      renames = new ArrayList<>();
-      reads = new HashMap<>();
+      renames.clear();
+      readColumns = new HashMap<>();
       steps[--currentStepNumber] = new WranglerTransformStep(stepName);
 
       for (String column : columns) {
-        curr = Type.valueOf(currStep.getLabel(column).toUpperCase());
+        Type curr = Type.valueOf(currStep.getLabel(column).toUpperCase());
         if (curr == Type.READ && state != Type.READ) {
-          reads = new HashMap<>();
+          readColumns = new HashMap<>();
         }
         if (curr != Type.RENAME && state == Type.RENAME) {
           insertRenames(renames);
-          renames = new ArrayList<>();
+          renames.clear();
         }
         state = curr;
         switch(curr) {
           case READ:
             if (column.contains(PARSE_KEY)) {
               for (String key : parse(column)) {
-                insertRead(key, reads);
+                insertRead(key);
               }
             } else {
-              insertRead(column, reads);
+              insertRead(column);
             }
             break;
 
           case MODIFY:
             if (column.contains(PARSE_KEY)) {
               for (String key : parse(column)) {
-                insertModify(key, reads);
+                insertModify(key);
               }
             } else {
-              insertModify(column, reads);
+              insertModify(column);
             }
             break;
 
           case ADD:
             if (column.contains(PARSE_KEY)) {
               for (String key : parse(column)) {
-                insertAdd(key, reads);
+                insertAdd(key);
               }
             } else {
-              insertAdd(column, reads);
+              insertAdd(column);
             }
             break;
 
           case DROP:
-            insertDrop(column, reads);
+            insertDrop(column);
             break;
 
           case RENAME:
